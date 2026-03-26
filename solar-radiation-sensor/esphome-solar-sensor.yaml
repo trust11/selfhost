@@ -1,0 +1,229 @@
+# ESPHome Konfiguration: Solarstrahlungs-Sensor fuer Home Assistant
+# Zweck: Sonneneinstrahlung messen, PV-Ertrag abschaetzen,
+#         EV-Ladung waehrend Sonnenstunden optimieren.
+#
+# Hardware:
+#   - ESP32 DevKit (z.B. ESP32-WROOM-32)
+#   - BH1750 Lux-Sensor (I2C, Adresse 0x23)
+#
+# Verkabelung (I2C):
+#   ESP32 GPIO21 (SDA) -> Sensor SDA
+#   ESP32 GPIO22 (SCL) -> Sensor SCL
+#   ESP32 3.3V          -> Sensor VCC
+#   ESP32 GND           -> Sensor GND
+#
+# Montage-Empfehlung:
+#   - Sensor draussen montieren, moeglichst gleiche Ausrichtung wie PV-Module
+#   - Balkon, Fenstersims oder Aussenwand (Suedseite)
+#   - Wetterfestes Gehaeuse (IP65)
+#   - Sensor-Fenster Richtung Himmel / gleiche Neigung wie Module
+
+esphome:
+  name: solar-radiation-sensor
+  friendly_name: "Solarstrahlungs-Sensor"
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Solar-Sensor-Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+sensor:
+  # BH1750 Lux-Sensor
+  - platform: bh1750
+    name: "Sonneneinstrahlung Lux"
+    address: 0x23
+    update_interval: 30s
+    id: solar_lux
+    unit_of_measurement: "lx"
+    accuracy_decimals: 0
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 2
+
+  # Umrechnung Lux -> W/m² (Naeherung fuer Sonnenlicht)
+  # 1 W/m² entspricht ca. 120 Lux bei Sonnenlicht-Spektrum
+  - platform: template
+    name: "Sonneneinstrahlung"
+    id: solar_irradiance_wm2
+    unit_of_measurement: "W/m²"
+    accuracy_decimals: 1
+    icon: "mdi:white-balance-sunny"
+    lambda: |-
+      float lux = id(solar_lux).state;
+      if (isnan(lux)) return NAN;
+      return lux / 120.0;
+    update_interval: 30s
+
+  # ============================================================
+  # Geschaetzte PV-Leistung
+  # ============================================================
+  # WICHTIG: Passe diese Werte an deine Anlage an!
+  #
+  # Wenn du die Anlagengroesse nicht genau kennst:
+  #   - Typisches Einfamilienhaus Schweiz: 8-15 kWp
+  #   - 1 kWp ≈ ca. 5 m² Modulflaeche
+  #   - Schau auf die Stromrechnung: Jahresertrag / 950 ≈ kWp (Mittelland)
+  #   - Oder zaehle die Module: 1 Modul ≈ 0.3-0.4 kWp
+  - platform: template
+    name: "Geschaetzte PV-Leistung"
+    id: estimated_pv_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    icon: "mdi:solar-power"
+    lambda: |-
+      float irradiance = id(solar_irradiance_wm2).state;
+      if (isnan(irradiance)) return NAN;
+
+      // =============================================
+      // ANPASSEN AN DEINE ANLAGE:
+      // =============================================
+      float peak_power_wp = 10000.0;  // Nennleistung in Wp (10 kWp = 10000)
+      float system_losses = 0.80;     // Verluste: Wechselrichter, Kabel, Temperatur, Verschmutzung
+
+      // STC = 1000 W/m², daher: Leistung = Einstrahlung/1000 * Nennleistung * Verluste
+      float power = (irradiance / 1000.0) * peak_power_wp * system_losses;
+      return power;
+    update_interval: 30s
+
+  # ============================================================
+  # EV-Laden: Verfuegbare Leistung fuer Wallbox
+  # ============================================================
+  # Grundlast des Hauses abziehen, Rest kann ins Auto
+  - platform: template
+    name: "Verfuegbar fuer EV-Ladung"
+    id: available_ev_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    icon: "mdi:ev-station"
+    lambda: |-
+      float pv_power = id(estimated_pv_power).state;
+      if (isnan(pv_power)) return 0.0;
+
+      // Grundlast Haushalt abziehen (Kuehlschrank, Standby, etc.)
+      // Typisch 300-600W, anpassen an deinen Haushalt
+      float household_base_load = 400.0;
+
+      float available = pv_power - household_base_load;
+      if (available < 0) return 0.0;
+      return available;
+    update_interval: 30s
+
+  # Wie viele Ampere kann die Wallbox ziehen? (1-phasig oder 3-phasig)
+  - platform: template
+    name: "EV Lade-Ampere moeglich"
+    id: ev_charge_amps
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    icon: "mdi:current-ac"
+    lambda: |-
+      float available = id(available_ev_power).state;
+      if (isnan(available) || available < 1380) return 0.0;
+
+      // Einphasig 230V: Minimum 6A (1380W), Maximum 16A (3680W)
+      // Dreiphasig 400V: Minimum 6A (4140W), Maximum 16A (11040W)
+      //
+      // ANPASSEN: Fuer 3-phasig die Zeile unten aendern:
+      //   float amps = available / 690.0;  // 3 * 230V
+      float amps = available / 230.0;  // 1-phasig
+
+      if (amps < 6.0) return 0.0;    // Unter 6A kann nicht geladen werden
+      if (amps > 16.0) return 16.0;   // Maximum begrenzen
+      return amps;
+    update_interval: 30s
+
+  # Tagesertrag
+  - platform: total_daily_energy
+    name: "Geschaetzter Tagesertrag"
+    power_id: estimated_pv_power
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 2
+    icon: "mdi:solar-power-variant"
+    filters:
+      - multiply: 0.001
+
+  # WiFi Signalstaerke
+  - platform: wifi_signal
+    name: "Sensor WiFi Signal"
+    update_interval: 60s
+
+binary_sensor:
+  # Kann das Auto jetzt geladen werden?
+  - platform: template
+    name: "EV Laden moeglich"
+    id: ev_charging_possible
+    icon: "mdi:car-electric"
+    lambda: |-
+      float amps = id(ev_charge_amps).state;
+      return !isnan(amps) && amps >= 6.0;
+
+  # Lohnt es sich, das Auto jetzt anzuschliessen?
+  # (Genug Sonne fuer mindestens ~1.4 kW Ladeleistung)
+  - platform: template
+    name: "Sonne aktiv"
+    id: sun_active
+    icon: "mdi:weather-sunny"
+    lambda: |-
+      float irradiance = id(solar_irradiance_wm2).state;
+      if (isnan(irradiance)) return false;
+      return irradiance > 50.0;
+
+text_sensor:
+  # Ladeempfehlung als Klartext
+  - platform: template
+    name: "Ladeempfehlung"
+    icon: "mdi:car-electric-outline"
+    lambda: |-
+      float available = id(available_ev_power).state;
+      float amps = id(ev_charge_amps).state;
+      if (isnan(available)) return {"Keine Daten"};
+      if (available < 500)  return {"Nicht laden - kaum Solarstrom"};
+      if (amps < 6.0)       return {"Zu wenig fuer Wallbox (< 6A / 1.4 kW)"};
+      if (amps < 10.0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Laden moeglich: %.0fA / %.1f kW", amps, amps * 0.23);
+        return {buf};
+      }
+      if (amps >= 10.0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Gute Sonne! Laden mit %.0fA / %.1f kW", amps, amps * 0.23);
+        return {buf};
+      }
+      return {"Unbekannt"};
+    update_interval: 60s
+
+  # Einstrahlungs-Kategorie
+  - platform: template
+    name: "Einstrahlungs-Kategorie"
+    icon: "mdi:weather-partly-cloudy"
+    lambda: |-
+      float irr = id(solar_irradiance_wm2).state;
+      if (isnan(irr)) return {"Unbekannt"};
+      if (irr < 10)   return {"Nacht/Schatten"};
+      if (irr < 100)  return {"Bewoelkt"};
+      if (irr < 400)  return {"Teilweise bewoelkt"};
+      if (irr < 700)  return {"Leicht bewoelkt"};
+      return {"Volle Sonne"};
+    update_interval: 60s

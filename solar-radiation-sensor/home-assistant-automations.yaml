@@ -1,0 +1,107 @@
+# Home Assistant Automationen fuer den Solarstrahlungs-Sensor
+#
+# Diese Automationen nutzen die Daten des ESPHome-Sensors,
+# um PV-Prognosen zu verbessern und Verschattung zu erkennen.
+
+# Automation 1: Benachrichtigung bei unerwartet hoher/niedriger Produktion
+- id: solar_production_alert
+  alias: "Solar - Abweichung Prognose vs. Messung"
+  description: >
+    Warnt, wenn die gemessene Einstrahlung stark von der
+    Wetterprognose abweicht (nuetzlich um zu lernen,
+    wann die Bergverschattung einsetzt).
+  trigger:
+    - platform: time_pattern
+      minutes: "/30"
+  condition:
+    - condition: sun
+      after: sunrise
+      after_offset: "01:00:00"
+    - condition: sun
+      before: sunset
+      before_offset: "01:00:00"
+  action:
+    - variables:
+        measured_irradiance: "{{ states('sensor.sonneneinstrahlung_w_m') | float(0) }}"
+        # Vergleich mit Wetter-Integration (z.B. OpenWeatherMap cloud_coverage)
+        cloud_cover: "{{ states('sensor.openweathermap_cloud_coverage') | float(50) }}"
+        expected_clear_sky: 800  # W/m² bei klarem Himmel
+        expected_irradiance: "{{ expected_clear_sky * (1 - cloud_cover / 100) }}"
+        deviation: "{{ ((measured_irradiance - expected_irradiance) / expected_irradiance * 100) | round(0) }}"
+    - choose:
+        # Gemessen viel weniger als erwartet -> Bergschatten!
+        - conditions:
+            - condition: template
+              value_template: "{{ deviation | float < -50 }}"
+          sequence:
+            - service: notify.notify
+              data:
+                title: "Bergschatten erkannt"
+                message: >
+                  Einstrahlung nur {{ measured_irradiance | round(0) }} W/m²
+                  (erwartet: {{ expected_irradiance | round(0) }} W/m²).
+                  Vermutlich Bergverschattung aktiv.
+
+# Automation 2: Logging der Verschattungszeiten
+# Hilft, ein Profil zu erstellen, wann Sonne/Schatten ist
+- id: solar_shadow_log_start
+  alias: "Solar - Verschattung Beginn"
+  description: "Erkennt, wann die Bergverschattung beginnt"
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.sonneneinstrahlung_w_m
+      below: 50
+  condition:
+    - condition: sun
+      after: sunrise
+      before: sunset
+  action:
+    - service: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.letzter_schattenbeginn
+      data:
+        datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+    - service: logbook.log
+      data:
+        name: "Bergschatten"
+        message: "Verschattung begonnen um {{ now().strftime('%H:%M') }}"
+        entity_id: sensor.sonneneinstrahlung_w_m
+
+- id: solar_sun_log_start
+  alias: "Solar - Sonne Beginn"
+  description: "Erkennt, wann die Sonne am Standort tatsaechlich scheint"
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.sonneneinstrahlung_w_m
+      above: 100
+  condition:
+    - condition: sun
+      after: sunrise
+      before: sunset
+  action:
+    - service: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.letzter_sonnenbeginn
+      data:
+        datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+    - service: logbook.log
+      data:
+        name: "Sonne"
+        message: "Sonneneinstrahlung begonnen um {{ now().strftime('%H:%M') }}"
+        entity_id: sensor.sonneneinstrahlung_w_m
+
+# Automation 3: Taegliche Zusammenfassung
+- id: solar_daily_summary
+  alias: "Solar - Taegliche Zusammenfassung"
+  trigger:
+    - platform: time
+      at: "20:00:00"
+  action:
+    - service: notify.notify
+      data:
+        title: "Solar Tagesbericht"
+        message: >
+          Geschaetzter Tagesertrag: {{ states('sensor.geschaetzter_tagesertrag') }} kWh
+          Erste Sonne: {{ states('input_datetime.letzter_sonnenbeginn') }}
+          Letzter Schatten: {{ states('input_datetime.letzter_schattenbeginn') }}
+          Aktuelle Einstrahlung: {{ states('sensor.sonneneinstrahlung_w_m') }} W/m²
