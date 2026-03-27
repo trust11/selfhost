@@ -1,8 +1,9 @@
 # Autarker Solarstrahlungs-Sensor fuer Home Assistant
 
-Komplett solarbetriebener Sensor - kein Netzanschluss, kein Kabel.
-Misst die tatsaechliche Sonneneinstrahlung am Standort und schaetzt
-den PV-Ertrag der Dachanlage ab, um EV-Ladung zu optimieren.
+Komplett solarbetriebener Sensor mit Supercap-Puffer - kein Akku, kein
+Netzanschluss, kein Kabel. Misst die tatsaechliche Sonneneinstrahlung
+am Standort und schaetzt den PV-Ertrag der Dachanlage ab, um
+EV-Ladung zu optimieren.
 
 ## Problem
 
@@ -13,8 +14,11 @@ den PV-Ertrag der Dachanlage ab, um EV-Ladung zu optimieren.
 
 ## Loesung
 
-Autarker Sensor mit eigenem Solarpanel + Akku, der die echte Einstrahlung
-misst und per WiFi an Home Assistant meldet. Kann ueberall aufgehaengt werden.
+Autarker Sensor mit eigenem Solarpanel + Supercaps als Puffer.
+Solange Sonne da ist, laeuft der Sensor und misst. Bei Wolken
+ueberbruecken die Supercaps ca. 30-60 Minuten. Wenn die Sonne
+dann wirklich weg ist, geht der Sensor aus - und das ist ok,
+denn dann gibt es auch keinen PV-Strom zum Messen.
 
 ## Einkaufsliste (ca. 15-25 EUR)
 
@@ -23,27 +27,28 @@ misst und per WiFi an Home Assistant meldet. Kann ueberall aufgehaengt werden.
 | ESP32 DevKit V1 (WROOM-32)    | ~5-8 EUR | AliExpress, Bastelgarage.ch, Amazon    |
 | BH1750 Breakout (GY-302)      | ~2-4 EUR | Lux-Sensor                             |
 | Mini-Solarpanel 5V/6V, 1-2W   | ~3-5 EUR | ca. 80x55mm genuegt                    |
-| TP4056 Lademodul (mit Schutz!) | ~1-2 EUR | Micro-USB Variante mit DW01 Schutz-IC  |
-| 18650 Li-Ion Akku              | ~3-5 EUR | z.B. aus altem Laptop, oder neu kaufen  |
-| 18650 Halter                   | ~1 EUR   | Zum Einloeten oder Clippen              |
+| Supercap-Modul 10F 5.5V       | ~3-5 EUR | ODER 2x 25F 2.7V in Reihe             |
+| Schottky-Diode (1N5817)       | ~0.20 EUR| Verhindert Rueckfluss ins Panel        |
 | IP65 Gehaeuse                  | ~3-5 EUR | Wetterfest                             |
 | Dupont-Kabel (4 Stueck)       | ~1 EUR   | Oft beim ESP32 dabei                   |
-| 2x 100kOhm Widerstaende       | ~0.10 EUR| Fuer Batteriespannungsmessung (optional)|
+| 2x 100kOhm Widerstaende       | ~0.10 EUR| Fuer Supercap-Spannungsmessung         |
 
-**Optional:** 2x 100kOhm Widerstaende als Spannungsteiler, um die
-Batteriespannung zu ueberwachen. Sehr empfohlen damit du siehst,
-ob der Akku voll ist oder leer wird.
+**Kein Akku, kein Lademodul, kein TP4056 noetig!**
+Supercaps sind wartungsfrei, halten quasi ewig (>500'000 Ladezyklen)
+und funktionieren auch bei Kaelte im Winter problemlos.
 
 ## Verkabelung
 
 ```
-SOLARPANEL               TP4056 LADEMODUL            ESP32
-  (+) ──────────────────> IN+
-  (-) ──────────────────> IN-
-                          OUT+ ───────────────────> VIN (oder 5V)
-                          OUT- ───────────────────> GND
-                          BAT+ ──> 18650 (+)
-                          BAT- ──> 18650 (-)
+SOLARPANEL                                  ESP32
+  (+) ──> Schottky-Diode ──┬──────────────> VIN (oder 5V)
+  (-) ──────────────────┬──┴──────────────> GND
+                        │
+   Supercap (+) ────────┤ (nach der Diode!)
+   Supercap (-) ────────┘ (an GND)
+
+   Die Diode verhindert, dass die Supercaps sich
+   ueber das Panel entladen wenn keine Sonne da ist.
 
 ESP32                    BH1750
   GPIO21 (SDA) ─────────> SDA
@@ -51,8 +56,8 @@ ESP32                    BH1750
   3.3V ─────────────────> VCC
   GND ──────────────────> GND
 
-Batteriespannung messen (optional):
-  BAT+ ──> 100kOhm ──┬──> ESP32 GPIO35
+Supercap-Spannung messen (empfohlen):
+  VIN ───> 100kOhm ──┬──> ESP32 GPIO35
                       │
                      100kOhm
                       │
@@ -61,14 +66,17 @@ Batteriespannung messen (optional):
 
 ## So funktioniert's
 
-1. ESP32 wacht alle **2 Minuten** aus dem Deep-Sleep auf
-2. Misst Lux-Wert mit BH1750
-3. Rechnet in W/m² um und schaetzt PV-Leistung
-4. Sendet alles an Home Assistant
-5. Geht wieder schlafen (~10uA Verbrauch)
+1. Sonne scheint -> Solarpanel liefert Strom + laedt Supercaps
+2. ESP32 laeuft, misst Lux mit BH1750, sendet an Home Assistant
+3. Wolke kommt -> Supercaps ueberbruecken 30-60 Minuten
+4. Sonne bleibt weg -> ESP32 geht in Deep-Sleep (spart Strom)
+5. Supercaps leer -> Sensor geht aus (kein Problem, keine Sonne = kein PV-Strom)
+6. Naechster Morgen -> Sonne laedt Supercaps, Sensor startet automatisch
 
-Der 18650 Akku haelt damit **mehrere Tage ohne Sonne**.
-Mit Solarpanel laedt er sich tagsueglich automatisch nach.
+**Smarte Deep-Sleep Steuerung:**
+- Sonne da (> 30 W/m²) -> ESP32 bleibt wach, misst alle 30 Sekunden
+- Sonne weg -> Deep-Sleep, wacht alle 5 Min kurz auf zum Pruefen
+- So halten die Supercaps deutlich laenger
 
 ## Sensoren in Home Assistant
 
@@ -81,9 +89,8 @@ Mit Solarpanel laedt er sich tagsueglich automatisch nach.
 | EV Lade-Ampere moeglich       | A       | Moegliche Ampere fuer Wallbox             |
 | EV Laden moeglich              | on/off  | Genug Strom fuer Wallbox (>= 6A)?        |
 | Ladeempfehlung                 | Text    | Klartext-Empfehlung                       |
-| Batteriespannung               | V       | Spannung des 18650 Akkus                  |
-| Batteriestand                  | %       | Ladestand in Prozent                      |
-| Batterie Status                | Text    | Voll/OK/Niedrig/Kritisch                  |
+| Supercap Spannung              | V       | Aktuelle Spannung der Supercaps           |
+| Supercap Ladestand             | %       | Ladestand der Supercaps                   |
 | Sonne aktiv                   | on/off  | Scheint die Sonne gerade?                 |
 | Einstrahlungs-Kategorie       | Text    | Nacht/Bewoelkt/Teilweise/Volle Sonne     |
 
@@ -108,9 +115,9 @@ float household_base_load = 400.0;  // Grundlast deines Haushalts in W
 
 ## OTA-Updates (kabellos)
 
-Da der Sensor im Deep-Sleep ist, muss fuer Updates der **OTA Modus**
-Schalter in Home Assistant eingeschaltet werden. Dann bleibt der ESP32
-wach und kann per WiFi geflasht werden.
+Der OTA Modus Schalter in Home Assistant verhindert Deep-Sleep,
+damit der ESP32 wach bleibt und per WiFi geflasht werden kann.
+Nur bei Sonnenschein moeglich (Sensor muss laufen).
 
 ## Tipps
 
@@ -120,3 +127,5 @@ wach und kann per WiFi geflasht werden.
   gibt es ESP32 mit externer Antenne
 - **Kalibrierung:** Nach ein paar Tagen Betrieb kannst du die Werte mit
   deiner Stromrechnung vergleichen und den `system_losses` Faktor anpassen
+- **Supercap-Groesse:** 10F reicht fuer ~15-30 Min Puffer,
+  2x 25F in Reihe fuer ~30-60 Min. Bei Deep-Sleep noch deutlich laenger.
