@@ -1,74 +1,122 @@
-# Solarstrahlungs-Sensor fuer Home Assistant
+# Autarker Solarstrahlungs-Sensor fuer Home Assistant
 
-Lokale Messung der Sonneneinstrahlung mit ESP32 + BH1750, optimiert fuer
-Bergstandorte mit Horizontverschattung.
+Komplett solarbetriebener Sensor - kein Netzanschluss, kein Kabel.
+Misst die tatsaechliche Sonneneinstrahlung am Standort und schaetzt
+den PV-Ertrag der Dachanlage ab, um EV-Ladung zu optimieren.
 
 ## Problem
 
+- PV-Anlage auf dem Dach, aber kein Zugang zum Wechselrichter
 - Wetterprognosen gehen von freiem Horizont aus
-- Am Bergstandort: spaete Morgensonne, frueher Nachmittagsschatten
-- PV-Ertragsprognosen sind dadurch ungenau
+- Bergstandort: spaete Morgensonne, frueher Nachmittagsschatten
+- Wissen wann genug Solarstrom da ist, um das Auto zu laden
 
 ## Loesung
 
-Ein guenstiger Lux-Sensor (BH1750) am ESP32 misst die **tatsaechliche
-Einstrahlung vor Ort** und meldet sie via ESPHome an Home Assistant.
+Autarker Sensor mit eigenem Solarpanel + Akku, der die echte Einstrahlung
+misst und per WiFi an Home Assistant meldet. Kann ueberall aufgehaengt werden.
 
-## Hardware (ca. 10-15 EUR)
+## Einkaufsliste (ca. 15-25 EUR)
 
-| Bauteil           | Preis   |
-|--------------------|---------|
-| ESP32 DevKit       | ~5 EUR  |
-| BH1750 Breakout    | ~3 EUR  |
-| Gehaeuse (IP65)    | ~5 EUR  |
-| Dupont-Kabel       | ~1 EUR  |
+| Bauteil                        | Preis    | Bemerkung                              |
+|--------------------------------|----------|----------------------------------------|
+| ESP32 DevKit V1 (WROOM-32)    | ~5-8 EUR | AliExpress, Bastelgarage.ch, Amazon    |
+| BH1750 Breakout (GY-302)      | ~2-4 EUR | Lux-Sensor                             |
+| Mini-Solarpanel 5V/6V, 1-2W   | ~3-5 EUR | ca. 80x55mm genuegt                    |
+| TP4056 Lademodul (mit Schutz!) | ~1-2 EUR | Micro-USB Variante mit DW01 Schutz-IC  |
+| 18650 Li-Ion Akku              | ~3-5 EUR | z.B. aus altem Laptop, oder neu kaufen  |
+| 18650 Halter                   | ~1 EUR   | Zum Einloeten oder Clippen              |
+| IP65 Gehaeuse                  | ~3-5 EUR | Wetterfest                             |
+| Dupont-Kabel (4 Stueck)       | ~1 EUR   | Oft beim ESP32 dabei                   |
+| 2x 100kOhm Widerstaende       | ~0.10 EUR| Fuer Batteriespannungsmessung (optional)|
 
-### Verkabelung
+**Optional:** 2x 100kOhm Widerstaende als Spannungsteiler, um die
+Batteriespannung zu ueberwachen. Sehr empfohlen damit du siehst,
+ob der Akku voll ist oder leer wird.
+
+## Verkabelung
 
 ```
-ESP32 GPIO21 (SDA) --> BH1750 SDA
-ESP32 GPIO22 (SCL) --> BH1750 SCL
-ESP32 3.3V         --> BH1750 VCC
-ESP32 GND          --> BH1750 GND
+SOLARPANEL               TP4056 LADEMODUL            ESP32
+  (+) ──────────────────> IN+
+  (-) ──────────────────> IN-
+                          OUT+ ───────────────────> VIN (oder 5V)
+                          OUT- ───────────────────> GND
+                          BAT+ ──> 18650 (+)
+                          BAT- ──> 18650 (-)
+
+ESP32                    BH1750
+  GPIO21 (SDA) ─────────> SDA
+  GPIO22 (SCL) ─────────> SCL
+  3.3V ─────────────────> VCC
+  GND ──────────────────> GND
+
+Batteriespannung messen (optional):
+  BAT+ ──> 100kOhm ──┬──> ESP32 GPIO35
+                      │
+                     100kOhm
+                      │
+  GND ────────────────┘
 ```
+
+## So funktioniert's
+
+1. ESP32 wacht alle **2 Minuten** aus dem Deep-Sleep auf
+2. Misst Lux-Wert mit BH1750
+3. Rechnet in W/m² um und schaetzt PV-Leistung
+4. Sendet alles an Home Assistant
+5. Geht wieder schlafen (~10uA Verbrauch)
+
+Der 18650 Akku haelt damit **mehrere Tage ohne Sonne**.
+Mit Solarpanel laedt er sich tagsueglich automatisch nach.
 
 ## Sensoren in Home Assistant
 
-| Sensor                        | Einheit | Beschreibung                          |
-|-------------------------------|---------|---------------------------------------|
-| Sonneneinstrahlung Lux        | lx      | Roher Lux-Wert                        |
-| Sonneneinstrahlung W/m²       | W/m²    | Umgerechnete Bestrahlungsstaerke      |
-| Geschaetzte PV-Leistung       | W       | Momentane PV-Leistung (konfigurierbar)|
-| Geschaetzter Tagesertrag      | kWh     | Kumulierter Tagesertrag               |
-| Sonne aktiv                   | on/off  | Scheint die Sonne gerade?             |
-| Einstrahlungs-Kategorie       | Text    | Nacht/Bewoelkt/Volle Sonne           |
+| Sensor                        | Einheit | Beschreibung                              |
+|-------------------------------|---------|-------------------------------------------|
+| Sonneneinstrahlung Lux        | lx      | Roher Lux-Wert                            |
+| Sonneneinstrahlung             | W/m²    | Umgerechnete Bestrahlungsstaerke          |
+| Geschaetzte PV-Leistung       | W       | Momentane PV-Leistung der Dachanlage      |
+| Verfuegbar fuer EV-Ladung     | W       | Nach Abzug Grundlast Haushalt             |
+| EV Lade-Ampere moeglich       | A       | Moegliche Ampere fuer Wallbox             |
+| EV Laden moeglich              | on/off  | Genug Strom fuer Wallbox (>= 6A)?        |
+| Ladeempfehlung                 | Text    | Klartext-Empfehlung                       |
+| Batteriespannung               | V       | Spannung des 18650 Akkus                  |
+| Batteriestand                  | %       | Ladestand in Prozent                      |
+| Batterie Status                | Text    | Voll/OK/Niedrig/Kritisch                  |
+| Sonne aktiv                   | on/off  | Scheint die Sonne gerade?                 |
+| Einstrahlungs-Kategorie       | Text    | Nacht/Bewoelkt/Teilweise/Volle Sonne     |
 
 ## Installation
 
 1. ESPHome Add-on in Home Assistant installieren
 2. `esphome-solar-sensor.yaml` als neues Geraet hinzufuegen
 3. WiFi-Credentials in `secrets.yaml` eintragen
-4. ESP32 flashen
-5. Sensor montieren (gleiche Ausrichtung wie PV-Module)
+4. ESP32 per USB flashen (einmalig)
+5. Alles zusammenbauen und draussen montieren
 6. Optional: Automationen aus `home-assistant-automations.yaml` uebernehmen
 
-## Anpassung an deine PV-Anlage
+## Anpassung an deine Dachanlage
 
-In `esphome-solar-sensor.yaml` die folgenden Werte anpassen:
+In `esphome-solar-sensor.yaml` diese Werte anpassen:
 
 ```yaml
-float panel_area_m2 = 20.0;       // Gesamtflaeche deiner Module in m²
-float module_efficiency = 0.18;    // Wirkungsgrad (Datenblatt)
-float system_losses = 0.85;        // Systemverluste
+float peak_power_wp = 10000.0;  // Nennleistung deiner Dachanlage in Wp
+float system_losses = 0.80;     // Systemverluste
+float household_base_load = 400.0;  // Grundlast deines Haushalts in W
 ```
 
-## Alternativen
+## OTA-Updates (kabellos)
 
-| Sensor        | Preis     | Genauigkeit | Bemerkung                    |
-|---------------|-----------|-------------|-------------------------------|
-| BH1750        | ~3 EUR    | Gut         | Lux-basiert, guenstig         |
-| VEML7700      | ~5 EUR    | Besser      | Breiteres Spektrum + UV       |
-| Apogee SP-110 | ~150 EUR  | Sehr gut    | Echtes Pyranometer, W/m²      |
-| TSL2591       | ~5 EUR    | Gut         | Hohe Dynamik, IR + sichtbar   |
+Da der Sensor im Deep-Sleep ist, muss fuer Updates der **OTA Modus**
+Schalter in Home Assistant eingeschaltet werden. Dann bleibt der ESP32
+wach und kann per WiFi geflasht werden.
 
-Fuer die meisten Heimanwendungen reicht der BH1750 voellig aus.
+## Tipps
+
+- **Solarpanel-Ausrichtung:** Gleich wie deine Dach-PV-Module ausrichten,
+  dann misst der Sensor genau das, was die Dachanlage auch "sieht"
+- **WiFi-Reichweite:** ESP32 hat ca. 30-50m Reichweite. Falls zu weit weg,
+  gibt es ESP32 mit externer Antenne
+- **Kalibrierung:** Nach ein paar Tagen Betrieb kannst du die Werte mit
+  deiner Stromrechnung vergleichen und den `system_losses` Faktor anpassen
